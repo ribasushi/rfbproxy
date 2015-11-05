@@ -321,11 +321,11 @@ static int write_packet (FILE *f, const void *buf, size_t len,
  * 'automatically' move to the next packet whenever we run out of data
  * in the current one.  Of course, with computers, nothing happens
  * 'automatically'.  Sigh.  We use a 'fileptr' structure to keep trace
- * of where we are in the recorded file.  'next_packet' always points
- * to the next FBS packet in the mmap'ed file; 'buf' points to the
- * current byte in the current packet; 'len' indicates how many
- * bytes are left in the current packet; 'ms' is the timestamp
- * on the current packet.
+ * of where we are in the recorded file.  'next_fbs_start' always points
+ * to the next FBS packet in the mmap'ed file; 'cursor' points to the
+ * current byte in the current RFB fragment; 'rfb_remaining' indicates how
+ * many RFB bytes are left in the current fragment; 'ms' is the timestamp
+ * on the current FBS packet.
  */
 
 typedef struct fbs_fileptr {
@@ -335,9 +335,9 @@ typedef struct fbs_fileptr {
 	int major_version;
 	int minor_version;
 
-	unsigned char *next_packet;
-	unsigned char *buf;
-	size_t len;
+	unsigned char *next_fbs_start;
+	unsigned char *cursor;
+	size_t rfb_remaining;
 	unsigned long ms;
 } FBSfile;
 
@@ -355,52 +355,52 @@ typedef struct fbs_fileptr {
  */
 
 static int fbs_at_eof(FBSfile *file) {
-	return (file->len == 0);
+	return (file->rfb_remaining == 0);
 }
 
 static void next_packet(FBSfile *file) {
 
 	uint32_t *bit32;
 
-	if (file->len == 0) {
+	if (file->rfb_remaining == 0) {
 		/* past EOF - do nothing */
 		return;
 	}
 
-	if (file->map + file->map_size - file->next_packet
+	if (file->map + file->map_size - file->next_fbs_start
 	    < (2 * sizeof (uint32_t))) {
 		/* at EOF - set EOF flag */
-		file->len = 0;
+		file->rfb_remaining = 0;
 		return;
 	}
 
-	bit32 = (uint32_t *) file->next_packet;
-	file->len = ntohl (*bit32);
+	bit32 = (uint32_t *) file->next_fbs_start;
+	file->rfb_remaining = ntohl (*bit32);
 
-	if (file->map + file->map_size - file->next_packet
-	    < (2 * sizeof (uint32_t)) + file->len) {
-		/* something's wrong with this file - the next packet
+	if (file->map + file->map_size - file->next_fbs_start
+	    < (2 * sizeof (uint32_t)) + file->rfb_remaining) {
+		/* something's wrong with this file - the next fragment
 		 * appears to go past EOF.  Signal EOF now.
 		 */
-		file->len = 0;
+		file->rfb_remaining = 0;
 		return;
 	}
 
 	/* delay from start of capture in milliseconds */
 
-	bit32 = (uint32_t *) (4 + file->next_packet
-			      + 4 * ((file->len + 3)/ 4));
+	bit32 = (uint32_t *) (4 + file->next_fbs_start
+			      + 4 * ((file->rfb_remaining + 3)/ 4));
 	file->ms = ntohl (*bit32);
 
-	/* set buf to start of data packet */
-	file->buf = file->next_packet + sizeof (uint32_t);
+	/* point to start of RFB fragment */
+	file->cursor = file->next_fbs_start + sizeof (uint32_t);
 
-	/* set next_packet to start of next data packet */
-	file->next_packet += 2 * sizeof (uint32_t) + 4 * ((file->len + 3) / 4);
+	/* now point to start of next FBS packet */
+	file->next_fbs_start += 2 * sizeof (uint32_t) + 4 * ((file->rfb_remaining + 3) / 4);
 
 	if (verbose >= 3) {
 		fprintf(stderr, "next_packet(): offset=%ld len=%ld ms=%ld\n",
-			file->buf - file->map, file->len, file->ms);
+			file->cursor - file->map, file->rfb_remaining, file->ms);
 	}
 }
 
@@ -448,8 +448,9 @@ static int FBSopen (const char *filename, FBSfile *fileptr)
 	fileptr->major_version = 1;
 	fileptr->minor_version = fileptr->map[10] - '0';
 
-	fileptr->next_packet = fileptr->map + 12; /* Skip version */
-	fileptr->len = 12;
+	/* Skip version */
+	fileptr->next_fbs_start = fileptr->map + 12;
+	fileptr->rfb_remaining = 12;
 
 	next_packet(fileptr);
 	return 0;
@@ -487,11 +488,11 @@ void get_bytes(FBSfile *file, void *dest, int bytes)
 	 * be exported before we begin processing the next packet.
 	 */
 
-	while ((bytes >= file->len) && !fbs_at_eof(file)) {
-		bytes -= file->len;
+	while ((bytes >= file->rfb_remaining) && !fbs_at_eof(file)) {
+		bytes -= file->rfb_remaining;
 		if (dest) {
-			memcpy(dest, file->buf, file->len);
-			dest += file->len;
+			memcpy(dest, file->cursor, file->rfb_remaining);
+			dest += file->rfb_remaining;
 		}
 		next_packet(file);
 	}
@@ -500,9 +501,9 @@ void get_bytes(FBSfile *file, void *dest, int bytes)
 		if (fbs_at_eof(file)) {
 			if (dest) bzero(dest, bytes);
 		} else {
-			if (dest) memcpy(dest, file->buf, bytes);
-			file->buf += bytes;
-			file->len -= bytes;
+			if (dest) memcpy(dest, file->cursor, bytes);
+			file->cursor += bytes;
+			file->rfb_remaining -= bytes;
 		}
 	}
 }
@@ -2079,7 +2080,7 @@ static int playback (const char *filename, int clientr, int clientw, int loop,
 			 * FramebufferUpdates), so just leave it on.
 			 */
 
-			do_write (clientw, fileptr.buf, fileptr.len);
+			do_write (clientw, fileptr.cursor, fileptr.rfb_remaining);
 			next_packet(&fileptr);
 
 		} else {
@@ -2099,7 +2100,7 @@ static int playback (const char *filename, int clientr, int clientw, int loop,
 
 			int length;
 
-			switch (fileptr.buf[0]) {
+			switch (fileptr.cursor[0]) {
 			case 0:
 				translate_FramebufferUpdate(&fileptr, outfile,
 							    &server_fbf,
@@ -2484,7 +2485,7 @@ static int export (const char *filename, int framerate_n, int framerate_m)
 
 	while (!fbs_at_eof(&fileptr)) {
 
-		switch (fileptr.buf[0]) {
+		switch (fileptr.cursor[0]) {
 		case 0:
 			process_FramebufferUpdate(&fileptr, format);
 
