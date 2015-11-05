@@ -399,7 +399,7 @@ static void next_packet(FBSfile *file) {
 	file->next_packet += 2 * sizeof (uint32_t) + 4 * ((file->len + 3) / 4);
 
 	if (verbose >= 3) {
-		fprintf(stderr, "next_packet(): offset=%d len=%d ms=%ld\n",
+		fprintf(stderr, "next_packet(): offset=%ld len=%ld ms=%ld\n",
 			file->buf - file->map, file->len, file->ms);
 	}
 }
@@ -439,7 +439,7 @@ static int FBSopen (const char *filename, FBSfile *fileptr)
 
 	close (fd);
 
-	if (strncmp (fileptr->map, "FBS 001.", 8) != 0) {
+	if (strncmp ((char *)fileptr->map, "FBS 001.", 8) != 0) {
 		fprintf (stderr, "%s: Incorrect FBS version\n", filename);
 		FBSclose(fileptr);
 		return -1;
@@ -587,14 +587,14 @@ static int get_initial_RFB_handshake(FBSfile *file,
 				     struct FramebufferFormat *format)
 {
 	int minor_protocol_version;
-	char buffer[32];
+	unsigned char buffer[32];
 	int auth;
 	int length;
 
 	/* The server hello (RFB version 3.x, we hope) */
 
 	get_bytes(file, &buffer, 12);
-	if (strncmp(buffer, "RFB 003.", 8) != 0) {
+	if (strncmp((char *)buffer, "RFB 003.", 8) != 0) {
 		fprintf(stderr, "Unknown RFB protocol\n");
 		return -1;
 	}
@@ -742,7 +742,7 @@ static int do_passthrough_authentication (int server, int clientr, int clientw,
 					  FILE *f, int do_events_instead,
 					  struct FramebufferFormat *fbf)
 {
-	char packet[24];
+	unsigned char packet[24];
 	size_t packet_size;
 	struct timeval start;
 	uint32_t auth;
@@ -914,7 +914,7 @@ static int do_passthrough_authentication (int server, int clientr, int clientw,
 static int do_standalone_authentication (int server, FILE *f,
 					 struct FramebufferFormat * fbf)
 {
-	char packet[24];
+	unsigned char packet[24];
 	size_t packet_size;
 	struct timeval start;
 	uint32_t auth;
@@ -1057,7 +1057,7 @@ static int do_standalone_authentication (int server, FILE *f,
 static int do_server_initialization (int clientr, int clientw,
 				     struct FramebufferFormat *fbf)
 {
-	char packet[24];
+	unsigned char packet[24];
 	uint32_t noauth = htonl(1);
 
 	/* s->c ProtocolVersion */
@@ -1093,7 +1093,7 @@ static int do_server_initialization (int clientr, int clientw,
  * part.
  */
 
-static size_t variable_part (char *buffer)
+static size_t variable_part (unsigned char *buffer)
 {
 	int message = (int) *buffer;
 	switch (message) {
@@ -1132,7 +1132,7 @@ static size_t variable_part (char *buffer)
 }
 
 /* For recording */
-static int process_client_message (char *fixed, char *variable, FILE *f)
+static int process_client_message (unsigned char *fixed, char *variable, FILE *f)
 {
 	static int first = 1;
 	static char delayed_output[100];
@@ -1311,7 +1311,7 @@ static int record (const char *file, int clientr, int clientw,
 	const char *version1 = "FBS 001.001\n";
 	FILE *f;
 	int server = -1;
-	struct timeval epoch;
+	struct timeval epoch = { 0, 0 };
 	struct timeval tv;
 	struct timeval diff;
 	struct timezone tz;
@@ -1481,7 +1481,7 @@ static int record (const char *file, int clientr, int clientw,
 			 * The largest non-variable part of a
 			 * client->server message is 20 bytes.  */
 			static char tmp_buffer[20];
-			static char client_buffer[20];
+			static unsigned char client_buffer[20];
 			static char *variable_buffer;
 			static size_t variable_bytes_left;
 			static size_t variable_bytes_got;
@@ -1614,7 +1614,7 @@ static int handle_client_during_playback (int clientr, int cycle, int pause,
 	 * The largest non-variable part of a
 	 * client->server message is 20 bytes.  */
 	static char tmp_buffer[20];
-	static char client_buffer[20];
+	static unsigned char client_buffer[20];
 	static char *variable_buffer;
 	static size_t variable_bytes_left;
 	static size_t variable_bytes_got;
