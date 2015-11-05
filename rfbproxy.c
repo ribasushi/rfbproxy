@@ -300,6 +300,10 @@ static ssize_t do_read (int fd, void *buf, size_t len)
 	return len;
 }
 
+static size_t pad32( size_t len ) {
+  return ( sizeof (uint32_t) * ( ( len + 3 ) / 4 ) );
+}
+
 /********** WRITING FBS FILES **********/
 
 static int write_packet (FILE *f, const void *buf, size_t len,
@@ -307,7 +311,7 @@ static int write_packet (FILE *f, const void *buf, size_t len,
 {
 	uint32_t timestamp = htonl (1000 * tvp->tv_sec + tvp->tv_usec / 1000);
 	uint32_t dlen = htonl (len);
-	len = 4 * ((len + 3) / 4);
+	len = pad32(len);
 	fwrite (&dlen, 4, 1, f);
 	fwrite (buf, 1, len, f);
 	fwrite (&timestamp, 4, 1, f);
@@ -387,16 +391,14 @@ static void next_packet(FBSfile *file) {
 	}
 
 	/* delay from start of capture in milliseconds */
-
-	bit32 = (uint32_t *) (4 + file->next_fbs_start
-			      + 4 * ((file->rfb_remaining + 3)/ 4));
+	bit32 = (uint32_t *) ( file->next_fbs_start + sizeof(uint32_t) + pad32(file->rfb_remaining) );
 	file->ms = ntohl (*bit32);
 
 	/* point to start of RFB fragment */
 	file->cursor = file->next_fbs_start + sizeof (uint32_t);
 
 	/* now point to start of next FBS packet */
-	file->next_fbs_start += 2 * sizeof (uint32_t) + 4 * ((file->rfb_remaining + 3) / 4);
+	file->next_fbs_start += 2 * sizeof(uint32_t) + pad32( file->rfb_remaining );
 
 	if (verbose >= 3) {
 		fprintf(stderr, "next_packet(): offset=%ld len=%ld ms=%ld\n",
