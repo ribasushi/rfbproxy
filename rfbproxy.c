@@ -325,8 +325,7 @@ static int write_packet (FILE *f, const void *buf, size_t len,
  * 'automatically' move to the next packet whenever we run out of data
  * in the current one.  Of course, with computers, nothing happens
  * 'automatically'.  Sigh.  We use a 'fileptr' structure to keep trace
- * of where we are in the recorded file.  'next_fbs_start' always points
- * to the next FBS packet in the mmap'ed file; 'cursor' points to the
+ * of where we are in the recorded file.; 'cursor' points to the
  * current byte in the current RFB fragment; 'rfb_remaining' indicates how
  * many RFB bytes are left in the current fragment; 'ms' is the timestamp
  * on the current FBS packet.
@@ -339,7 +338,6 @@ typedef struct fbs_fileptr {
 	int major_version;
 	int minor_version;
 
-	unsigned char *next_fbs_start;
 	unsigned char *cursor;
 	size_t rfb_remaining;
 	unsigned long ms;
@@ -365,24 +363,36 @@ static int fbs_at_eof(FBSfile *file) {
 static void next_packet(FBSfile *file) {
 
 	uint32_t *bit32;
+	uint8_t mod;
 
 	if (file->rfb_remaining == 0) {
 		/* past EOF - do nothing */
 		return;
 	}
 
-	if (file->map + file->map_size - file->next_fbs_start
-	    < (2 * sizeof (uint32_t))) {
+	/* is there space for at least RFB fragment length + timestamp */
+	if (file->map_size
+	     < pad32( (file->cursor - file->map) + file->rfb_remaining )
+	        + 2 * sizeof (uint32_t)) {
 		/* at EOF - set EOF flag */
 		file->rfb_remaining = 0;
 		return;
 	}
 
-	bit32 = (uint32_t *) file->next_fbs_start;
+	/* advance to start of next RFB fragment */
+	file->cursor += file->rfb_remaining + 2 * sizeof(uint32_t);
+	if(( mod = ( file->cursor - file->map ) % 4 )) {
+	  file->cursor += 4 - mod;
+	}
+
+	/* record RFB fragment length */
+	bit32 = (uint32_t *) ( file->cursor - sizeof(uint32_t) );
 	file->rfb_remaining = ntohl (*bit32);
 
-	if (file->map + file->map_size - file->next_fbs_start
-	    < (2 * sizeof (uint32_t)) + file->rfb_remaining) {
+	/* check if (newly read) fragment length + timestamp still fits */
+	if ( file->map + file->map_size
+	    < (file->cursor + pad32(file->rfb_remaining) + sizeof (uint32_t))
+	) {
 		/* something's wrong with this file - the next fragment
 		 * appears to go past EOF.  Signal EOF now.
 		 */
@@ -391,14 +401,8 @@ static void next_packet(FBSfile *file) {
 	}
 
 	/* delay from start of capture in milliseconds */
-	bit32 = (uint32_t *) ( file->next_fbs_start + sizeof(uint32_t) + pad32(file->rfb_remaining) );
+	bit32 = (uint32_t *) ( file->cursor + pad32(file->rfb_remaining) );
 	file->ms = ntohl (*bit32);
-
-	/* point to start of RFB fragment */
-	file->cursor = file->next_fbs_start + sizeof (uint32_t);
-
-	/* now point to start of next FBS packet */
-	file->next_fbs_start += 2 * sizeof(uint32_t) + pad32( file->rfb_remaining );
 
 	if (verbose >= 3) {
 		fprintf(stderr, "next_packet(): offset=%ld len=%ld ms=%ld\n",
@@ -450,9 +454,14 @@ static int FBSopen (const char *filename, FBSfile *fileptr)
 	fileptr->major_version = 1;
 	fileptr->minor_version = fileptr->map[10] - '0';
 
-	/* Skip version */
-	fileptr->next_fbs_start = fileptr->map + 12;
-	fileptr->rfb_remaining = 12;
+	/* In order to cleanly invoke the next_packet() logic, we trick it
+	   by pretending we are in a data packet: fake that we are at the start
+	   of an RFB fragment, with 4 bytes of data left in it, and next_packet()
+	   will take care of skipping over the "timestamp", adding up to the
+	   full 12 bytes of header
+	*/
+	fileptr->cursor = fileptr->map + 4;
+	fileptr->rfb_remaining = 4;
 
 	next_packet(fileptr);
 	return 0;
