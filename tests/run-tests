@@ -56,4 +56,4 @@ if [ `$RFBPROXY -x windows.fbs | md5sum | cut -c1-32`\
      = 4f66176c036200b4345a85c3ba98062b ]; then echo passed; \
 else echo FAILED; FAILED=1; export FAILED; \
 fi
-if [ "$$FAILED" == "1" ]; then exit 1; fi
+if [ "$FAILED" = "1" ]; then exit 1; fi
