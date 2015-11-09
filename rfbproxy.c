@@ -334,6 +334,7 @@ static int write_packet (FILE *f, const void *buf, size_t len,
 typedef struct fbs_fileptr {
 	unsigned char *map;
 	size_t map_size;
+	uint8_t eof;
 
 	int major_version;
 	int minor_version;
@@ -356,17 +357,12 @@ typedef struct fbs_fileptr {
  * xvncviewer.
  */
 
-static int fbs_at_eof(FBSfile *file) {
-	return (file->rfb_remaining == 0);
-}
-
 static void next_packet(FBSfile *file) {
 
 	uint32_t *bit32;
 	uint8_t mod;
 
-	if (file->rfb_remaining == 0) {
-		/* past EOF - do nothing */
+	if (file->eof) {
 		return;
 	}
 
@@ -374,8 +370,7 @@ static void next_packet(FBSfile *file) {
 	if (file->map_size
 	     < pad32( (file->cursor - file->map) + file->rfb_remaining )
 	        + 2 * sizeof (uint32_t)) {
-		/* at EOF - set EOF flag */
-		file->rfb_remaining = 0;
+		file->eof = 1;
 		return;
 	}
 
@@ -396,8 +391,15 @@ static void next_packet(FBSfile *file) {
 		/* something's wrong with this file - the next fragment
 		 * appears to go past EOF.  Signal EOF now.
 		 */
-		file->rfb_remaining = 0;
+		file->eof = 1;
 		return;
+	}
+
+	/* an explicit zero-length RFB fragment means eof
+	   though we still need to update the timestamp below
+	*/
+	if ( file->rfb_remaining == 0 ) {
+		file->eof = 1;
 	}
 
 	/* delay from start of capture in milliseconds */
@@ -444,6 +446,8 @@ static int FBSopen (const char *filename, FBSfile *fileptr)
 	}
 
 	close (fd);
+
+	fileptr->eof = 0;
 
 	if (strncmp ((char *)fileptr->map, "FBS 001.", 8) != 0) {
 		fprintf (stderr, "%s: Incorrect FBS version\n", filename);
@@ -499,7 +503,7 @@ void get_bytes(FBSfile *file, void *dest, int bytes)
 	 * be exported before we begin processing the next packet.
 	 */
 
-	while ((bytes >= file->rfb_remaining) && !fbs_at_eof(file)) {
+	while ( !file->eof && (bytes >= file->rfb_remaining) ) {
 		bytes -= file->rfb_remaining;
 		if (dest) {
 			memcpy(dest, file->cursor, file->rfb_remaining);
@@ -509,7 +513,7 @@ void get_bytes(FBSfile *file, void *dest, int bytes)
 	}
 
 	if (bytes > 0) {
-		if (fbs_at_eof(file)) {
+		if (file->eof) {
 			if (dest) bzero(dest, bytes);
 		} else {
 			if (dest) memcpy(dest, file->cursor, bytes);
@@ -1987,7 +1991,7 @@ static int playback (const char *filename, int clientr, int clientw, int loop,
 		fprintf(stderr, "Playing %s\n", filename);
 	}
 	
-	while (!fbs_at_eof(&fileptr)) {
+	while (!fileptr.eof) {
 
 		struct timeval tv, deadline;
 		struct timezone tz;
@@ -2494,7 +2498,7 @@ static int export (const char *filename, int framerate_n, int framerate_m)
 		return -1;
 	}
 
-	while (!fbs_at_eof(&fileptr)) {
+	while (!fileptr.eof) {
 
 		switch (fileptr.cursor[0]) {
 		case 0:
