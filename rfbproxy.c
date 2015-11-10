@@ -332,24 +332,58 @@ static int write_packet (FILE *f, const void *buf, size_t len,
  */
 
 typedef struct fbs_fileptr {
-	unsigned char *map;
-	size_t map_size;
+	int fd;
 	uint8_t eof;
 
 	int major_version;
 	int minor_version;
 
+	unsigned char *buf;
+	size_t buf_size;
+
 	unsigned char *cursor;
 	size_t rfb_remaining;
+
 	unsigned long ms;
 } FBSfile;
 
-/* next_packet() advances to the next FBS packet in the input steam
+/* This is a preliminary version of the stream reader. For the time being
+ * it simply attempts to read the exact amount of bytes requested into buf
+ * starting at the current cursor. On any error / short read it simply bails
+ * declaring EOF. Subsequent commits will adjust this to be more intelligent
+ * wrt blocking until the requested amount of bytes are available
+ */
+static int read_from_stream ( FBSfile *file, size_t bytes ) {
+
+  int cursor_offset;
+
+  /* initial buffer too short */
+  if( file->buf_size - (cursor_offset = (file->cursor - file->buf) ) < bytes ) {
+    if (verbose >= 3) {
+      fprintf(stderr, "read_from_stream(): current buffer too small at %ld bytes, extending to %ld\n",
+        file->buf_size, bytes+cursor_offset);
+    }
+
+    file->buf = realloc( file->buf, bytes+cursor_offset );
+    if (file->buf == NULL) {
+    fprintf (stderr, "Unable to extend read buffer\n" );
+      return 0;
+    }
+
+    file->buf_size = bytes + cursor_offset;
+    file->cursor = file->buf + cursor_offset;
+  }
+
+  if( read( file->fd, file->cursor, bytes ) == bytes ) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/* next_packet() reads the next FBS packet from the input stream
  *
- * We really don't have to consider read errors, since we've mmap()'ed
- * the entire FBS file, but if the file is truncated (a common
- * occurance) or we get out sync somehow, we can hit EOF way down deep
- * inside these routines.  This is particularly an issue when we're
+ * Do our best to detect eof. This is particularly an issue when we're
  * playing back a series of files and one of them is truncated.
  * We've got to make sure we cleanly end the last FramebufferUpdate,
  * so we keep reading zeros after EOF.  This can produce a bunch
@@ -360,64 +394,79 @@ typedef struct fbs_fileptr {
 static void next_packet(FBSfile *file) {
 
 	uint32_t *bit32;
-	uint8_t mod;
 
 	if (file->eof) {
 		return;
 	}
 
-	/* is there space for at least RFB fragment length + timestamp */
-	if (file->map_size
-	     < pad32( (file->cursor - file->map) + file->rfb_remaining )
-	        + 2 * sizeof (uint32_t)) {
-		file->eof = 1;
-		return;
-	}
+  /* reset cursor */
+  file->cursor = file->buf;
 
-	/* advance to start of next RFB fragment */
-	file->cursor += file->rfb_remaining + 2 * sizeof(uint32_t);
-	if(( mod = ( file->cursor - file->map ) % 4 )) {
-	  file->cursor += 4 - mod;
-	}
+  /* Read next fragment size and *the next* dword. This lets us bail early
+     on truncations and saves an extra read in case we deal with the final
+     empty fragment below
+   */
+  if ( ! read_from_stream( file, 2*sizeof(uint32_t) ) ) {
+    /* something went wrong - couldn't read fragment size + (maybe)tstamp */
+    file->eof = 1;
+    return;
+  }
 
-	/* record RFB fragment length */
-	bit32 = (uint32_t *) ( file->cursor - sizeof(uint32_t) );
-	file->rfb_remaining = ntohl (*bit32);
+  bit32 = (uint32_t *) file->cursor;
+  file->rfb_remaining = ntohl( *bit32 );
 
-	/* check if (newly read) fragment length + timestamp still fits */
-	if ( file->map + file->map_size
-	    < (file->cursor + pad32(file->rfb_remaining) + sizeof (uint32_t))
-	) {
-		/* something's wrong with this file - the next fragment
-		 * appears to go past EOF.  Signal EOF now.
-		 */
-		file->eof = 1;
-		return;
-	}
+  /*
+     only read more in case there is anything to read
+     an explicit zero-length RFB fragment means eof
+     though we still need to update the timestamp below
+  */
+  if (file->rfb_remaining > 0) {
 
-	/* an explicit zero-length RFB fragment means eof
-	   though we still need to update the timestamp below
-	*/
-	if ( file->rfb_remaining == 0 ) {
-		file->eof = 1;
-	}
+    /* 2 dwords forward - skipping the fragment length and the prefetch */
+    file->cursor += 2 * sizeof(uint32_t);
+
+    /*
+     note that we read paded(rfb_remaining) after we already
+     read one dword above - this way we slurp the tstamp too
+     */
+    if ( ! read_from_stream( file, pad32(file->rfb_remaining) ) ) {
+      /* could not read entire packet including timestamp,
+         this is a non-recoverable EOF condition
+       */
+      file->eof = 1;
+      return;
+    }
+
+    /* cursor back to first rfb byte */
+    file->cursor -= sizeof(uint32_t);
+  }
+  else {
+    file->eof = 1;
+  }
 
 	/* delay from start of capture in milliseconds */
-	bit32 = (uint32_t *) ( file->cursor + pad32(file->rfb_remaining) );
+	bit32 = (uint32_t *) ( file->buf + sizeof(uint32_t) + pad32(file->rfb_remaining) );
 	file->ms = ntohl (*bit32);
 
 	if (verbose >= 3) {
 		fprintf(stderr, "next_packet(): offset=%ld len=%ld ms=%ld\n",
-			file->cursor - file->map, file->rfb_remaining, file->ms);
+			lseek(file->fd, 0, SEEK_CUR) - pad32(file->rfb_remaining) - sizeof(uint32_t),
+			file->rfb_remaining, file->ms);
 	}
 }
 
 static void FBSclose(FBSfile *file)
 {
-	if ((file->map != NULL)  &&  (file->map != MAP_FAILED)) {
-		munmap (file->map, file->map_size);
-	}
-	file->map = NULL;
+
+  if (file->fd != 0) {
+    close(file->fd);
+    file->fd = 0;
+  }
+
+  if (file->buf != NULL) {
+    free (file->buf);
+    file->buf = NULL;
+  }
 }
 
 static int FBSopen (const char *filename, FBSfile *fileptr)
@@ -436,42 +485,39 @@ static int FBSopen (const char *filename, FBSfile *fileptr)
 		return -1;
 	}
 
-	fileptr->map = mmap (NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	fileptr->map_size = st.st_size;
+	fileptr->fd = fd;
 
-	if (fileptr->map == MAP_FAILED) {
-		perror ("Couldn't map input file");
-		close (fd);
+	fileptr->buf_size = BUFSIZE * 2;
+	fileptr->buf = malloc( fileptr->buf_size );
+
+	if (fileptr->buf == NULL) {
+		fprintf (stderr, "Unable to allocate read buffer\n" );
+		FBSclose(fileptr);
 		return -1;
 	}
 
-	close (fd);
-
 	fileptr->eof = 0;
 
-	if (strncmp ((char *)fileptr->map, "FBS 001.", 8) != 0) {
+	if ( (read(fileptr->fd, fileptr->buf, 12)) < 12 ) {
+		fprintf (stderr, "%s: Unable to read 12 bytes of header: %s\n", filename, strerror(errno));
+		FBSclose(fileptr);
+		return -1;
+	}
+
+	if (strncmp ((char *)fileptr->buf, "FBS 001.", 8) != 0) {
 		fprintf (stderr, "%s: Incorrect FBS version\n", filename);
 		FBSclose(fileptr);
 		return -1;
 	}
 
 	fileptr->major_version = 1;
-	fileptr->minor_version = fileptr->map[10] - '0';
-
-	/* In order to cleanly invoke the next_packet() logic, we trick it
-	   by pretending we are in a data packet: fake that we are at the start
-	   of an RFB fragment, with 4 bytes of data left in it, and next_packet()
-	   will take care of skipping over the "timestamp", adding up to the
-	   full 12 bytes of header
-	*/
-	fileptr->cursor = fileptr->map + 4;
-	fileptr->rfb_remaining = 4;
+	fileptr->minor_version = fileptr->buf[10] - '0';
 
 	next_packet(fileptr);
 	return 0;
 }
 
-/* Copy a number of bytes from the mmap'ed data stream, jumping to
+/* Copy a number of bytes from the read buffer, jumping to
  * additional FBS packets if needed.  'dest' can be NULL, which
  * advances the pointer past the bytes without copying them.
  */
